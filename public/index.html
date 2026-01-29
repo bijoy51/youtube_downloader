@@ -133,14 +133,10 @@
             margin-bottom: 20px;
         }
 
-        .format-section {
-            margin-bottom: 20px;
-        }
-
         .format-section h3 {
             color: #fff;
             font-size: 0.95rem;
-            margin-bottom: 10px;
+            margin-bottom: 15px;
         }
 
         .format-btns {
@@ -159,17 +155,15 @@
             cursor: pointer;
             transition: all 0.3s;
             flex: 1;
-            min-width: 120px;
+            min-width: 140px;
+            text-align: center;
+            text-decoration: none;
+            display: inline-block;
         }
 
         .format-btn:hover {
             border-color: #ff0000;
             background: rgba(255, 0, 0, 0.1);
-        }
-
-        .format-btn:disabled {
-            opacity: 0.6;
-            cursor: not-allowed;
         }
 
         .format-btn.audio {
@@ -220,20 +214,6 @@
             display: block;
         }
 
-        .success {
-            background: rgba(0, 204, 102, 0.1);
-            border: 1px solid rgba(0, 204, 102, 0.3);
-            color: #00cc66;
-            padding: 15px;
-            border-radius: 10px;
-            margin-top: 15px;
-            display: none;
-        }
-
-        .success.show {
-            display: block;
-        }
-
         .footer {
             text-align: center;
             color: #666;
@@ -257,6 +237,7 @@
             .format-btn {
                 padding: 10px 18px;
                 font-size: 0.85rem;
+                min-width: 100%;
             }
         }
     </style>
@@ -276,11 +257,10 @@
 
         <div class="loading" id="loading">
             <div class="spinner"></div>
-            <p id="loadingText">Loading...</p>
+            <p>Loading...</p>
         </div>
 
         <div class="error" id="error"></div>
-        <div class="success" id="success"></div>
 
         <div class="video-info" id="videoInfo">
             <img class="thumbnail" id="thumbnail" src="" alt="Thumbnail">
@@ -289,14 +269,7 @@
 
             <div class="format-section">
                 <h3>Download Options</h3>
-                <div class="format-btns">
-                    <button class="format-btn" id="videoBtn" onclick="download('video')">
-                        Video (MP4)
-                    </button>
-                    <button class="format-btn audio" id="audioBtn" onclick="download('audio')">
-                        Audio (MP3)
-                    </button>
-                </div>
+                <div class="format-btns" id="downloadBtns"></div>
             </div>
         </div>
 
@@ -316,20 +289,12 @@
             }
 
             currentUrl = url;
-            showLoading(true, 'Getting video info...');
+            showLoading(true);
             hideError();
-            hideSuccess();
             hideVideoInfo();
 
             try {
-                const response = await fetch(`${API_BASE}/api/info`, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify({ url })
-                });
-
+                const response = await fetch(`${API_BASE}/api/info?url=${encodeURIComponent(url)}`);
                 const data = await response.json();
 
                 if (!response.ok) {
@@ -348,49 +313,32 @@
             document.getElementById('thumbnail').src = data.thumbnail;
             document.getElementById('videoTitle').textContent = data.title;
             document.getElementById('videoAuthor').textContent = `By: ${data.author}`;
+
+            // Create download buttons
+            const btnContainer = document.getElementById('downloadBtns');
+            btnContainer.innerHTML = '';
+
+            // Video download button
+            const videoBtn = document.createElement('a');
+            videoBtn.className = 'format-btn';
+            videoBtn.textContent = 'Video (MP4)';
+            videoBtn.href = `${API_BASE}/api/download?url=${encodeURIComponent(currentUrl)}&type=video`;
+            videoBtn.target = '_blank';
+            btnContainer.appendChild(videoBtn);
+
+            // Audio download button
+            const audioBtn = document.createElement('a');
+            audioBtn.className = 'format-btn audio';
+            audioBtn.textContent = 'Audio (MP3)';
+            audioBtn.href = `${API_BASE}/api/download?url=${encodeURIComponent(currentUrl)}&type=audio`;
+            audioBtn.target = '_blank';
+            btnContainer.appendChild(audioBtn);
+
             document.getElementById('videoInfo').classList.add('show');
         }
 
-        async function download(type) {
-            showLoading(true, 'Preparing download...');
-            hideError();
-            hideSuccess();
-
-            const btn = type === 'audio' ? document.getElementById('audioBtn') : document.getElementById('videoBtn');
-            btn.disabled = true;
-
-            try {
-                const response = await fetch(`${API_BASE}/api/download`, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify({ url: currentUrl, type })
-                });
-
-                const data = await response.json();
-
-                if (!response.ok) {
-                    throw new Error(data.error || 'Download failed');
-                }
-
-                if (data.downloadUrl) {
-                    showSuccess('Download starting...');
-                    window.open(data.downloadUrl, '_blank');
-                } else {
-                    throw new Error('No download URL received');
-                }
-            } catch (error) {
-                showError(error.message);
-            } finally {
-                showLoading(false);
-                btn.disabled = false;
-            }
-        }
-
-        function showLoading(show, text = 'Loading...') {
+        function showLoading(show) {
             document.getElementById('loading').classList.toggle('show', show);
-            document.getElementById('loadingText').textContent = text;
             document.getElementById('fetchBtn').disabled = show;
         }
 
@@ -402,17 +350,6 @@
 
         function hideError() {
             document.getElementById('error').classList.remove('show');
-        }
-
-        function showSuccess(message) {
-            const successDiv = document.getElementById('success');
-            successDiv.textContent = message;
-            successDiv.classList.add('show');
-            setTimeout(() => hideSuccess(), 3000);
-        }
-
-        function hideSuccess() {
-            document.getElementById('success').classList.remove('show');
         }
 
         function hideVideoInfo() {
