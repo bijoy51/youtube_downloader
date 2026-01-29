@@ -1,6 +1,5 @@
 const express = require('express');
 const cors = require('cors');
-const ytdl = require('@distube/ytdl-core');
 const path = require('path');
 
 const app = express();
@@ -10,102 +9,99 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static('public'));
 
-// Create agent with cookies for better reliability
-const agent = ytdl.createAgent(JSON.parse(process.env.YT_COOKIES || '[]'));
+// Cobalt API endpoint
+const COBALT_API = 'https://api.cobalt.tools/api/json';
 
-// Get video info
-app.get('/api/info', async (req, res) => {
+// Get video info and download link
+app.post('/api/info', async (req, res) => {
     try {
-        const { url } = req.query;
+        const { url } = req.body;
 
         if (!url) {
             return res.status(400).json({ error: 'URL required' });
         }
 
-        if (!ytdl.validateURL(url)) {
+        // Validate YouTube URL
+        const ytRegex = /^(https?:\/\/)?(www\.)?(youtube\.com|youtu\.be)\/.+/;
+        if (!ytRegex.test(url)) {
             return res.status(400).json({ error: 'Invalid YouTube URL' });
         }
 
-        const info = await ytdl.getInfo(url, {
-            agent,
-            requestOptions: {
-                headers: {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                }
-            }
-        });
+        // Get video info using oEmbed
+        const oembedUrl = `https://www.youtube.com/oembed?url=${encodeURIComponent(url)}&format=json`;
+        const infoResponse = await fetch(oembedUrl);
 
-        const formats = info.formats
-            .filter(f => f.hasVideo || f.hasAudio)
-            .map(f => ({
-                itag: f.itag,
-                quality: f.qualityLabel || f.audioQuality || 'Unknown',
-                container: f.container,
-                hasVideo: f.hasVideo,
-                hasAudio: f.hasAudio,
-                contentLength: f.contentLength,
-                mimeType: f.mimeType
-            }));
+        if (!infoResponse.ok) {
+            throw new Error('Could not fetch video info');
+        }
 
-        const videoFormats = formats.filter(f => f.hasVideo && f.hasAudio);
-        const audioFormats = formats.filter(f => f.hasAudio && !f.hasVideo);
+        const videoInfo = await infoResponse.json();
+
+        // Extract video ID for thumbnail
+        let videoId = '';
+        if (url.includes('youtu.be/')) {
+            videoId = url.split('youtu.be/')[1].split('?')[0];
+        } else if (url.includes('v=')) {
+            videoId = url.split('v=')[1].split('&')[0];
+        }
 
         res.json({
-            title: info.videoDetails.title,
-            thumbnail: info.videoDetails.thumbnails[info.videoDetails.thumbnails.length - 1]?.url,
-            duration: info.videoDetails.lengthSeconds,
-            author: info.videoDetails.author.name,
-            videoFormats,
-            audioFormats
+            title: videoInfo.title,
+            author: videoInfo.author_name,
+            thumbnail: `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`,
+            url: url
         });
     } catch (error) {
         console.error('Info error:', error.message);
-        res.status(500).json({ error: error.message || 'Failed to get video info.' });
+        res.status(500).json({ error: 'Failed to get video info. Check the URL.' });
     }
 });
 
-// Download video/audio
-app.get('/api/download', async (req, res) => {
+// Get download link from Cobalt
+app.post('/api/download', async (req, res) => {
     try {
-        const { url, itag, type } = req.query;
+        const { url, type } = req.body;
 
         if (!url) {
             return res.status(400).json({ error: 'URL required' });
         }
 
-        if (!ytdl.validateURL(url)) {
-            return res.status(400).json({ error: 'Invalid YouTube URL' });
+        const response = await fetch(COBALT_API, {
+            method: 'POST',
+            headers: {
+                'Accept': 'application/json',
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                url: url,
+                vCodec: 'h264',
+                vQuality: '1080',
+                aFormat: 'mp3',
+                isAudioOnly: type === 'audio',
+                filenamePattern: 'basic'
+            })
+        });
+
+        const data = await response.json();
+
+        if (data.status === 'error') {
+            throw new Error(data.text || 'Download failed');
         }
 
-        const info = await ytdl.getInfo(url, { agent });
-        const title = info.videoDetails.title.replace(/[^\w\s-]/g, '').substring(0, 50);
-
-        let options = { agent };
-        let ext = 'mp4';
-
-        if (type === 'audio') {
-            options = {
-                ...options,
-                quality: 'highestaudio',
-                filter: 'audioonly'
-            };
-            ext = 'mp3';
-        } else if (itag) {
-            options = { ...options, quality: itag };
+        if (data.status === 'redirect' || data.status === 'stream') {
+            res.json({ downloadUrl: data.url });
+        } else if (data.status === 'picker') {
+            // Multiple options available
+            res.json({
+                downloadUrl: data.picker[0]?.url || data.audio,
+                options: data.picker
+            });
         } else {
-            options = {
-                ...options,
-                quality: 'highest',
-                filter: 'audioandvideo'
-            };
+            throw new Error('Unexpected response from server');
         }
-
-        res.header('Content-Disposition', `attachment; filename="${title}.${ext}"`);
-
-        ytdl(url, options).pipe(res);
     } catch (error) {
         console.error('Download error:', error.message);
-        res.status(500).json({ error: 'Download failed. Try again.' });
+        res.status(500).json({ error: error.message || 'Download failed. Try again.' });
     }
 });
 
