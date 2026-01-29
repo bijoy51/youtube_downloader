@@ -1,7 +1,10 @@
 const express = require('express');
 const cors = require('cors');
-const ytdl = require('@distube/ytdl-core');
+const { exec, spawn } = require('child_process');
 const path = require('path');
+const { promisify } = require('util');
+
+const execAsync = promisify(exec);
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -9,6 +12,9 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 app.use(express.static('public'));
+
+// Get yt-dlp path
+const ytdlpPath = process.env.YTDLP_PATH || 'yt-dlp';
 
 // Extract video ID from YouTube URL
 function extractVideoId(url) {
@@ -23,7 +29,7 @@ function extractVideoId(url) {
     return null;
 }
 
-// Get video info
+// Get video info using yt-dlp
 app.get('/api/info', async (req, res) => {
     try {
         const { url } = req.query;
@@ -39,27 +45,25 @@ app.get('/api/info', async (req, res) => {
 
         const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
 
-        // Try to get info using ytdl-core
-        const info = await ytdl.getBasicInfo(videoUrl, {
-            requestOptions: {
-                headers: {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                    'Accept-Language': 'en-US,en;q=0.9',
-                }
-            }
-        });
+        // Use yt-dlp to get video info
+        const { stdout } = await execAsync(
+            `${ytdlpPath} --dump-json --no-download "${videoUrl}"`,
+            { timeout: 30000 }
+        );
+
+        const info = JSON.parse(stdout);
 
         res.json({
-            title: info.videoDetails.title,
-            author: info.videoDetails.author.name,
-            thumbnail: `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`,
-            duration: info.videoDetails.lengthSeconds,
+            title: info.title || 'YouTube Video',
+            author: info.uploader || info.channel || 'Unknown',
+            thumbnail: info.thumbnail || `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`,
+            duration: info.duration || 0,
             videoId: videoId
         });
     } catch (error) {
         console.error('Info error:', error.message);
 
-        // Fallback: Try to get basic info from video ID
+        // Fallback: Return basic info with thumbnail
         const videoId = extractVideoId(req.query.url);
         if (videoId) {
             res.json({
@@ -75,7 +79,7 @@ app.get('/api/info', async (req, res) => {
     }
 });
 
-// Download video/audio - Stream directly
+// Download video/audio using yt-dlp
 app.get('/api/download', async (req, res) => {
     try {
         const { url, type } = req.query;
@@ -91,36 +95,76 @@ app.get('/api/download', async (req, res) => {
 
         const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
 
-        const info = await ytdl.getInfo(videoUrl, {
-            requestOptions: {
-                headers: {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                }
-            }
-        });
+        // Get video title first
+        let title = 'video';
+        try {
+            const { stdout } = await execAsync(
+                `${ytdlpPath} --get-title "${videoUrl}"`,
+                { timeout: 15000 }
+            );
+            title = stdout.trim().replace(/[^\w\s-]/g, '').substring(0, 50) || 'video';
+        } catch (e) {
+            console.error('Title fetch error:', e.message);
+        }
 
-        const title = info.videoDetails.title.replace(/[^\w\s-]/g, '').substring(0, 50) || 'video';
-
-        let format;
-        let ext;
-
+        let format, ext;
         if (type === 'audio') {
-            format = ytdl.chooseFormat(info.formats, { quality: 'highestaudio', filter: 'audioonly' });
+            format = 'bestaudio';
             ext = 'mp3';
         } else {
-            // Try to get format with both audio and video
-            format = ytdl.chooseFormat(info.formats, { quality: 'highest', filter: 'audioandvideo' });
+            format = 'best[ext=mp4]/best';
             ext = 'mp4';
         }
 
         res.header('Content-Disposition', `attachment; filename="${title}.${ext}"`);
         res.header('Content-Type', type === 'audio' ? 'audio/mpeg' : 'video/mp4');
 
-        ytdl(videoUrl, { format }).pipe(res);
+        // Stream the download
+        const args = [
+            '-f', format,
+            '-o', '-',
+            '--no-playlist',
+            videoUrl
+        ];
+
+        if (type === 'audio') {
+            args.splice(2, 0, '-x', '--audio-format', 'mp3');
+        }
+
+        const ytdlp = spawn(ytdlpPath, args);
+
+        ytdlp.stdout.pipe(res);
+
+        ytdlp.stderr.on('data', (data) => {
+            console.error('yt-dlp stderr:', data.toString());
+        });
+
+        ytdlp.on('error', (error) => {
+            console.error('yt-dlp spawn error:', error);
+            if (!res.headersSent) {
+                res.status(500).json({ error: 'Download failed' });
+            }
+        });
+
+        ytdlp.on('close', (code) => {
+            if (code !== 0) {
+                console.error('yt-dlp exited with code:', code);
+            }
+        });
+
+        req.on('close', () => {
+            ytdlp.kill();
+        });
+
     } catch (error) {
         console.error('Download error:', error.message);
         res.status(500).json({ error: 'Download failed: ' + error.message });
     }
+});
+
+// Health check
+app.get('/health', (req, res) => {
+    res.json({ status: 'ok' });
 });
 
 // Serve frontend
