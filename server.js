@@ -10,6 +10,9 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static('public'));
 
+// Create agent with cookies for better reliability
+const agent = ytdl.createAgent(JSON.parse(process.env.YT_COOKIES || '[]'));
+
 // Get video info
 app.get('/api/info', async (req, res) => {
     try {
@@ -23,7 +26,14 @@ app.get('/api/info', async (req, res) => {
             return res.status(400).json({ error: 'Invalid YouTube URL' });
         }
 
-        const info = await ytdl.getInfo(url);
+        const info = await ytdl.getInfo(url, {
+            agent,
+            requestOptions: {
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                }
+            }
+        });
 
         const formats = info.formats
             .filter(f => f.hasVideo || f.hasAudio)
@@ -50,7 +60,7 @@ app.get('/api/info', async (req, res) => {
         });
     } catch (error) {
         console.error('Info error:', error.message);
-        res.status(500).json({ error: 'Failed to get video info. Try again.' });
+        res.status(500).json({ error: error.message || 'Failed to get video info.' });
     }
 });
 
@@ -67,22 +77,24 @@ app.get('/api/download', async (req, res) => {
             return res.status(400).json({ error: 'Invalid YouTube URL' });
         }
 
-        const info = await ytdl.getInfo(url);
+        const info = await ytdl.getInfo(url, { agent });
         const title = info.videoDetails.title.replace(/[^\w\s-]/g, '').substring(0, 50);
 
-        let options = {};
+        let options = { agent };
         let ext = 'mp4';
 
         if (type === 'audio') {
             options = {
+                ...options,
                 quality: 'highestaudio',
                 filter: 'audioonly'
             };
             ext = 'mp3';
         } else if (itag) {
-            options = { quality: itag };
+            options = { ...options, quality: itag };
         } else {
             options = {
+                ...options,
                 quality: 'highest',
                 filter: 'audioandvideo'
             };
